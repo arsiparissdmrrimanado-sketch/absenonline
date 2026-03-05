@@ -1,0 +1,609 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, collection, addDoc, serverTimestamp, onSnapshot, doc, setDoc, query, getDocs } from 'firebase/firestore';
+import { 
+  Camera, RefreshCw, LogIn, LogOut, CheckCircle, AlertCircle, 
+  Loader2, ChevronRight, X, LayoutDashboard, UserCheck, 
+  Image as ImageIcon, Settings, ShieldCheck, Clock, Printer, FileSpreadsheet,
+  User, History, Search, Link as LinkIcon, Cloud, Share2, Copy, ExternalLink, QrCode,
+  Smartphone
+} from 'lucide-react';
+
+// --- KONFIGURASI FIREBASE ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'sbml-rri-manado';
+
+const APP_LOGO = "https://lh3.googleusercontent.com/u/0/d/1UxSp_9U6A4wiDz-GarFhM31m3Ynrmdus=w1000?authuser=0";
+
+export default function App() {
+  // --- STATE MANAGEMENT ---
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('pegawai'); 
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+  const [adminPin, setAdminPin] = useState('');
+  const [savedPin, setSavedPin] = useState('1234');
+  const [spreadsheetUrl, setSpreadsheetUrl] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [tempSpreadsheetUrl, setTempSpreadsheetUrl] = useState('');
+  const [nama, setNama] = useState('');
+  const [status, setStatus] = useState(null);
+  const [image, setImage] = useState(null);
+  const [isCameraActive, setIsCameraActive] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [message, setMessage] = useState({ text: '', type: '' });
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [allAbsensi, setAllAbsensi] = useState([]); 
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [logoClickCount, setLogoClickCount] = useState(0);
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  // Menampilkan riwayat jika nama yang diketik minimal 3 karakter
+  const personalHistory = allAbsensi.filter(item => 
+    nama.trim().length >= 3 && 
+    item.nama.toLowerCase().includes(nama.trim().toLowerCase())
+  );
+
+  useEffect(() => {
+    if (logoClickCount >= 5) {
+      setShowAdminLogin(true);
+      setLogoClickCount(0); 
+    }
+    const timer = setTimeout(() => setLogoClickCount(0), 3000);
+    return () => clearTimeout(timer);
+  }, [logoClickCount]);
+
+  useEffect(() => {
+    let metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (!metaTheme) {
+      metaTheme = document.createElement('meta');
+      metaTheme.name = "theme-color";
+      document.getElementsByTagName('head')[0].appendChild(metaTheme);
+    }
+    metaTheme.content = "#1d4ed8";
+
+    let metaApple = document.querySelector('meta[name="apple-mobile-web-app-capable"]');
+    if (!metaApple) {
+      metaApple = document.createElement('meta');
+      metaApple.name = "apple-mobile-web-app-capable";
+      metaApple.content = "yes";
+      document.getElementsByTagName('head')[0].appendChild(metaApple);
+    }
+
+    document.title = "Absensi RRI Manado";
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+        setTimeout(() => setIsInitializing(false), 2000);
+      } catch (error) {
+        setIsInitializing(false);
+      }
+    };
+    initAuth();
+    const unsubscribeAuth = onAuthStateChanged(auth, (u) => setUser(u));
+    return () => unsubscribeAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const settingsDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'appearance');
+    const unsubscribeSettings = onSnapshot(settingsDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.adminPin) setSavedPin(data.adminPin);
+        if (data.spreadsheetUrl) {
+          setSpreadsheetUrl(data.spreadsheetUrl);
+          setTempSpreadsheetUrl(data.spreadsheetUrl);
+        }
+      }
+    });
+
+    const qAbsensi = collection(db, 'artifacts', appId, 'public', 'data', 'absensi');
+    const unsubscribeAbsensi = onSnapshot(qAbsensi, (snapshot) => {
+      const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setAllAbsensi(docs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)));
+    }, (error) => console.error("Firestore error:", error));
+
+    return () => {
+      unsubscribeSettings();
+      unsubscribeAbsensi();
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (activeTab === 'pegawai' && isCameraActive && !image && !isInitializing) {
+      const startCamera = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } }, 
+            audio: false 
+          });
+          if (videoRef.current) videoRef.current.srcObject = stream;
+        } catch (err) {
+          setMessage({ text: 'Gagal akses kamera. Periksa izin.', type: 'error' });
+        }
+      };
+      startCamera();
+    }
+    return () => {
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [isCameraActive, image, isInitializing, activeTab]);
+
+  const capturePhoto = () => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!video) return;
+
+    const ctx = canvas.getContext('2d');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    setImage(canvas.toDataURL('image/jpeg', 0.8));
+    setIsCameraActive(false);
+  };
+
+  const performSync = async (dataToSync) => {
+    if (!spreadsheetUrl) return;
+    try {
+      const payload = dataToSync.map(item => ({
+        nama: item.nama,
+        status: item.status,
+        tanggal: item.timestamp?.toDate?.()?.toLocaleDateString('id-ID') || item.timestamp?.toLocaleDateString?.('id-ID') || '-',
+        waktu: item.timestamp?.toDate?.()?.toLocaleTimeString('id-ID') || item.timestamp?.toLocaleTimeString?.('id-ID') || '-',
+        foto: 'Terlampir'
+      }));
+      await fetch(spreadsheetUrl, {
+        method: 'POST',
+        mode: 'no-cors', 
+        body: JSON.stringify(payload)
+      });
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!nama || !image || !status || !user) {
+      return setMessage({ text: 'Mohon lengkapi seluruh data dan foto.', type: 'error' });
+    }
+    setLoading(true);
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'absensi'), {
+        nama: nama.trim(),
+        status,
+        foto: image,
+        timestamp: serverTimestamp(),
+        userId: user.uid
+      });
+
+      setShowSuccessOverlay(true);
+
+      const newData = [{
+        nama: nama.trim(),
+        status,
+        timestamp: new Date() 
+      }, ...allAbsensi];
+      
+      performSync(newData);
+
+      setTimeout(() => {
+        setShowSuccessOverlay(false);
+        setNama(''); setStatus(null); setImage(null); setIsCameraActive(true); setMessage({ text: '', type: '' });
+      }, 3000);
+    } catch (e) {
+      setMessage({ text: 'Gagal mengirim data.', type: 'error' });
+    } finally { setLoading(false); }
+  };
+
+  const syncToGoogleSheets = async () => {
+    if (!spreadsheetUrl) return setMessage({ text: 'URL belum diset!', type: 'error' });
+    setSyncing(true);
+    const success = await performSync(allAbsensi);
+    if (success) {
+      setMessage({ text: 'Sinkronisasi berhasil!', type: 'success' });
+    } else {
+      setMessage({ text: 'Gagal sinkronisasi.', type: 'error' });
+    }
+    setSyncing(false);
+    setTimeout(() => setMessage({ text: '', type: '' }), 3000);
+  };
+
+  const handlePrint = () => {
+    const printWindow = window.open('', '_blank');
+    const htmlContent = `
+      <html>
+        <head>
+          <title>Laporan Absensi RRI MANADO</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; font-size: 12px; }
+            .header { display: flex; align-items: center; border-bottom: 2px solid #2563eb; margin-bottom: 20px; padding-bottom: 10px; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f8fafc; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <img src="${APP_LOGO}" style="width:50px; margin-right: 15px;" />
+            <div><h2 style="margin:0">RRI MANADO</h2><p style="margin:0">Laporan Absensi Pegawai</p></div>
+          </div>
+          <table>
+            <thead><tr><th>Nama</th><th>Tanggal</th><th>Waktu</th><th>Status</th></tr></thead>
+            <tbody>
+              ${allAbsensi.map((item) => {
+                const d = item.timestamp?.toDate?.() || new Date();
+                return `<tr><td>${item.nama}</td><td>${d.toLocaleDateString('id-ID')}</td><td>${d.toLocaleTimeString('id-ID')}</td><td>${item.status}</td></tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `;
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+    printWindow.print();
+  };
+
+  if (isInitializing) return (
+    <div className="fixed inset-0 flex items-center justify-center bg-white z-[999]">
+      <div className="flex flex-col items-center animate-in fade-in duration-500">
+        <div className="w-24 h-24 bg-blue-600 rounded-[2rem] flex items-center justify-center mb-6 shadow-xl animate-pulse">
+           <img src={APP_LOGO} alt="Logo" className="w-14 h-14 object-contain brightness-0 invert" />
+        </div>
+        <p className="text-[10px] font-black text-blue-600 uppercase tracking-[0.3em]">Memuat Sistem...</p>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="h-screen bg-blue-700 text-slate-900 flex flex-col max-w-md mx-auto relative overflow-hidden font-sans select-none">
+      
+      <header className="px-5 pt-8 pb-4 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-3">
+          <div 
+            onClick={() => setLogoClickCount(v => v + 1)}
+            className="w-12 h-12 bg-white rounded-xl p-2 shadow-lg active:scale-90 transition-transform cursor-pointer"
+          >
+             <img src={APP_LOGO} alt="Logo RRI" className="w-full h-full object-contain" />
+          </div>
+          <div className="text-white">
+            <h1 className="text-lg font-black leading-none tracking-tight">RRI MANADO</h1>
+            <p className="text-[9px] font-bold opacity-80 uppercase mt-0.5 tracking-wider">Absensi SBML</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+            <div className="text-right bg-white/10 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/10 text-white">
+                <p className="text-xs font-black font-mono leading-none">
+                  {currentTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                </p>
+                <p className="text-[8px] font-bold opacity-70 uppercase tracking-tighter mt-0.5">
+                  {currentTime.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' })}
+                </p>
+            </div>
+            {/* Tombol Berbagi Dihapus Sesuai Permintaan */}
+        </div>
+      </header>
+
+      <main className="flex-1 overflow-hidden relative bg-white rounded-t-[2.5rem] flex flex-col shadow-[0_-10px_30px_rgba(0,0,0,0.1)]">
+        {activeTab === 'pegawai' ? (
+          <div className="flex flex-col h-full">
+            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+              
+              <div className="relative aspect-square sm:aspect-video rounded-3xl overflow-hidden bg-slate-100 shadow-inner border border-slate-100">
+                {isCameraActive && !image ? (
+                  <div className="w-full h-full relative">
+                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                    <button 
+                      onClick={capturePhoto} 
+                      className="absolute bottom-4 left-1/2 -translate-x-1/2 w-14 h-14 bg-white rounded-full shadow-2xl flex items-center justify-center active:scale-95 border-4 border-blue-50"
+                    >
+                      <div className="w-9 h-9 bg-blue-600 rounded-full flex items-center justify-center text-white">
+                        <Camera size={18} />
+                      </div>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="h-full relative">
+                    <img src={image} className="w-full h-full object-cover" alt="Foto" />
+                    <button 
+                      onClick={() => { setImage(null); setIsCameraActive(true); }} 
+                      className="absolute top-3 right-3 w-9 h-9 bg-black/30 backdrop-blur-md text-white rounded-xl flex items-center justify-center"
+                    >
+                      <RefreshCw size={16} />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="relative">
+                  <User size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-blue-500" />
+                  <input 
+                    type="text" 
+                    value={nama} 
+                    onChange={(e) => setNama(e.target.value)} 
+                    placeholder="Nama Lengkap Pegawai..." 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-11 pr-5 py-3.5 font-bold text-sm text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={() => setStatus('Masuk')} 
+                    className={`h-16 rounded-2xl flex flex-col items-center justify-center gap-1 transition-all ${status === 'Masuk' ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-50 border border-slate-200 text-slate-400'}`}
+                  >
+                    <LogIn size={20} />
+                    <span className="text-[8px] font-black uppercase tracking-widest">Masuk</span>
+                  </button>
+                  <button 
+                    onClick={() => setStatus('Pulang')} 
+                    className={`h-16 rounded-2xl flex flex-col items-center justify-center gap-1 transition-all ${status === 'Pulang' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-50 border border-slate-200 text-slate-400'}`}
+                  >
+                    <LogOut size={20} />
+                    <span className="text-[8px] font-black uppercase tracking-widest">Pulang</span>
+                  </button>
+                </div>
+              </div>
+
+              {message.text && activeTab === 'pegawai' && (
+                <div className={`p-3 rounded-xl flex items-center gap-3 animate-in fade-in ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                  {message.type === 'success' ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
+                  <p className="text-[9px] font-black uppercase tracking-tight">{message.text}</p>
+                </div>
+              )}
+
+              <div className="pt-2">
+                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                  <History size={14} className="text-blue-500" /> Riwayat {nama.trim().length >= 3 && `(${nama})`}
+                </h3>
+                {nama.trim().length >= 3 ? (
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                    {personalHistory.length > 0 ? (
+                      personalHistory.slice(0, 5).map((item) => (
+                        <div key={item.id} className="bg-slate-50 p-2.5 rounded-2xl border border-slate-100 flex items-center gap-3">
+                          <img src={item.foto} className="w-10 h-10 rounded-lg object-cover" />
+                          <div className="flex-1">
+                            <div className="flex justify-between">
+                              <p className="text-[9px] font-black text-slate-800 uppercase truncate max-w-[120px]">{item.nama}</p>
+                              <span className={`text-[7px] font-black px-2 py-0.5 rounded-full border ${item.status === 'Masuk' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-900 text-white border-slate-800'}`}>
+                                {item.status}
+                              </span>
+                            </div>
+                            <p className="text-[8px] font-bold text-slate-400 mt-0.5">
+                              {item.timestamp?.toDate?.()?.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) || '-'} • {item.timestamp?.toDate?.()?.toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' }) || '-'}
+                            </p>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center py-4 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                        <p className="text-[8px] font-black text-slate-300 uppercase italic">Belum ada riwayat untuk "{nama}"</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                   <div className="text-center py-4 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-100">
+                     <p className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter">Ketik nama untuk melihat riwayat</p>
+                   </div>
+                )}
+              </div>
+            </div>
+
+            <div className="p-5 pt-0 border-t border-slate-50 bg-white/80 backdrop-blur-md">
+              <button 
+                onClick={handleSubmit} 
+                disabled={loading || !image || !nama || !status} 
+                className="w-full bg-blue-600 text-white h-14 rounded-2xl font-black shadow-xl flex items-center justify-center gap-2 text-xs tracking-widest uppercase disabled:opacity-50 active:scale-95 transition-all"
+              >
+                {loading ? <Loader2 className="animate-spin" size={20} /> : "Kirim Sekarang"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col h-full overflow-y-auto p-5 pb-12 space-y-6 animate-in slide-in-from-bottom-5">
+            <div className="flex items-center justify-between">
+               <h3 className="text-xs font-black uppercase tracking-widest text-blue-600">Administrator Mode</h3>
+               <button onClick={() => setActiveTab('pegawai')} className="p-2 bg-slate-100 rounded-full text-slate-500"><X size={18} /></button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-blue-50 p-4 rounded-3xl border border-blue-100">
+                <p className="text-[8px] font-black text-blue-500 uppercase mb-1 text-center">Hari Ini</p>
+                <p className="text-2xl font-black text-blue-900 text-center">
+                  {allAbsensi.filter(i => i.timestamp?.toDate?.()?.toDateString() === new Date().toDateString()).length}
+                </p>
+              </div>
+              <button onClick={() => setShowSettings(true)} className="bg-white p-4 rounded-3xl border border-slate-100 flex flex-col items-center justify-center gap-1 shadow-sm active:scale-95 transition-transform">
+                <Settings size={18} className="text-slate-400" />
+                <span className="text-[8px] font-black text-slate-400 uppercase">Settings</span>
+              </button>
+            </div>
+
+            <div className="bg-blue-600 p-5 rounded-3xl shadow-lg text-white space-y-4">
+               <div className="flex items-center gap-3">
+                  <Cloud size={20} />
+                  <div>
+                    <h4 className="text-[9px] font-black uppercase tracking-wider">Cloud Data</h4>
+                    <p className="text-[7px] font-bold opacity-80 uppercase">Sinkronisasi Ke Spreadsheet</p>
+                  </div>
+               </div>
+               <button 
+                onClick={syncToGoogleSheets}
+                disabled={syncing || !spreadsheetUrl}
+                className="w-full bg-white text-blue-600 py-3 rounded-xl text-[9px] font-black uppercase flex items-center justify-center gap-2 shadow-inner disabled:opacity-50"
+               >
+                 {syncing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                 Sync Manual
+               </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+               <button onClick={handlePrint} className="flex flex-col items-center gap-2 bg-slate-900 text-white p-4 rounded-3xl active:scale-95 transition-transform">
+                  <Printer size={18} />
+                  <span className="text-[8px] font-black uppercase">Print PDF</span>
+               </button>
+               <button onClick={() => {
+                  let csv = "Nama,Status,Waktu\n" + allAbsensi.map(i => `${i.nama},${i.status},${i.timestamp?.toDate?.()}`).join("\n");
+                  const blob = new Blob([csv], { type: 'text/csv' });
+                  const url = window.URL.createObjectURL(blob);
+                  const a = document.createElement('a'); a.href = url; a.download = 'absensi.csv'; a.click();
+               }} className="flex flex-col items-center gap-2 bg-green-600 text-white p-4 rounded-3xl active:scale-95 transition-transform">
+                  <FileSpreadsheet size={18} />
+                  <span className="text-[8px] font-black uppercase">Export CSV</span>
+               </button>
+            </div>
+            
+            <div className="space-y-3">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Log Absensi Terbaru</h3>
+              {allAbsensi.slice(0, 15).map((item) => (
+                <div key={item.id} className="bg-white p-2.5 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-3">
+                  <img src={item.foto} className="w-10 h-10 rounded-lg object-cover" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[9px] font-black text-slate-800 uppercase truncate">{item.nama}</p>
+                    <p className="text-[8px] font-bold text-slate-400">
+                      {item.status} • {item.timestamp?.toDate?.()?.toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' }) || '-'}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {showAdminLogin && (
+        <div className="fixed inset-0 z-[400] bg-slate-900/90 backdrop-blur-xl flex items-center justify-center p-6">
+          <div className="bg-white w-full max-w-[280px] rounded-[2.5rem] p-6 text-center animate-in zoom-in-95 shadow-2xl relative">
+            <button 
+              onClick={() => { setShowAdminLogin(false); setAdminPin(''); }} 
+              className="absolute top-4 right-4 text-slate-300 hover:text-slate-500"
+            >
+              <X size={18} />
+            </button>
+            <ShieldCheck size={32} className="mx-auto text-blue-600 mb-3" />
+            <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-5">PIN Keamanan Admin</h3>
+            <div className="flex gap-2 justify-center mb-6">
+               {[...Array(4)].map((_, i) => (
+                 <div key={i} className={`w-10 h-14 rounded-xl border-2 flex items-center justify-center text-xl font-black ${adminPin.length > i ? 'border-blue-600 bg-blue-50 text-blue-600' : 'border-slate-100'}`}>
+                   {adminPin[i] ? '•' : ''}
+                 </div>
+               ))}
+            </div>
+            <input 
+              type="password" 
+              maxLength="4" 
+              autoFocus
+              pattern="\d*"
+              inputMode="numeric"
+              onChange={(e) => {
+                const val = e.target.value.replace(/\D/g, '');
+                setAdminPin(val);
+                if (val.length === 4) {
+                  if (val === savedPin) { 
+                    setActiveTab('admin'); 
+                    setShowAdminLogin(false); 
+                    setAdminPin(''); 
+                    setMessage({ text: 'Selamat Datang Admin', type: 'success' });
+                  } else { 
+                    setAdminPin(''); 
+                    setMessage({ text: "PIN Salah!", type:'error' }); 
+                  }
+                }
+              }} 
+              className="absolute opacity-0 inset-0 cursor-pointer w-full h-full" 
+            />
+            <p className="text-[8px] font-bold text-slate-300 uppercase tracking-tighter italic">Ketik PIN untuk masuk</p>
+          </div>
+        </div>
+      )}
+
+      {showSuccessOverlay && (
+        <div className="fixed inset-0 z-[300] bg-blue-900/80 backdrop-blur-md flex items-center justify-center p-8 animate-in fade-in duration-300">
+          <div className="bg-white rounded-[2.5rem] p-8 w-full max-w-[240px] flex flex-col items-center shadow-2xl animate-in zoom-in-90">
+            <div className="w-16 h-16 bg-green-50 text-green-500 rounded-full flex items-center justify-center mb-4">
+              <CheckCircle size={40} />
+            </div>
+            <h2 className="text-sm font-black text-slate-900 uppercase">Sukses!</h2>
+            <p className="text-slate-400 font-bold text-[8px] mt-1 uppercase">Data Absensi Terkirim.</p>
+          </div>
+        </div>
+      )}
+
+      {showSettings && (
+        <div className="fixed inset-0 z-[500] bg-slate-900/95 backdrop-blur-xl flex items-center justify-center p-6">
+          <div className="bg-white w-full rounded-[2.5rem] p-7 max-w-sm space-y-6 animate-in zoom-in-95">
+            <div className="flex justify-between items-center">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-blue-600">Konfigurasi Sistem</h3>
+              <button onClick={() => setShowSettings(false)} className="text-slate-300 p-1"><X size={20} /></button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[8px] font-black text-slate-400 uppercase mb-2 block tracking-widest">Ganti PIN Admin (4 Digit)</label>
+                <input 
+                  type="password" 
+                  maxLength="4" 
+                  value={newPin} 
+                  onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))} 
+                  className="w-full h-12 bg-slate-50 border border-slate-200 rounded-xl text-center font-black focus:ring-2 focus:ring-blue-500 outline-none" 
+                  placeholder="****" 
+                />
+              </div>
+              <div>
+                <label className="text-[8px] font-black text-slate-400 uppercase mb-2 block tracking-widest">Google Apps Script URL</label>
+                <textarea 
+                  value={tempSpreadsheetUrl} 
+                  onChange={(e) => setTempSpreadsheetUrl(e.target.value)} 
+                  placeholder="https://script.google.com/macros/s/..."
+                  className="w-full h-24 bg-slate-50 border border-slate-200 rounded-xl p-3 text-[10px] font-bold focus:ring-2 focus:ring-blue-500 outline-none resize-none" 
+                />
+              </div>
+              <button 
+                onClick={async () => {
+                  setLoading(true);
+                  const data = { spreadsheetUrl: tempSpreadsheetUrl };
+                  if (newPin.length === 4) data.adminPin = newPin;
+                  await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'appearance'), data, { merge: true });
+                  setShowSettings(false); 
+                  setLoading(false);
+                  setMessage({ text: 'Pengaturan Disimpan', type: 'success' });
+                }} 
+                className="w-full bg-blue-600 text-white h-12 rounded-xl font-black text-[10px] uppercase shadow-lg active:scale-95 transition-all"
+              >
+                {loading ? <Loader2 className="animate-spin mx-auto" size={18} /> : "Simpan Perubahan"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <canvas ref={canvasRef} className="hidden" />
+      <div className="h-4 bg-white shrink-0"></div>
+    </div>
+  );
+}
